@@ -2,6 +2,7 @@
 title: dcm-udlm-alignment
 authors:
   - "@vkolodny"
+# cspell:ignore udlm vkolodny
 reviewers:
   - TBD
 approvers:
@@ -21,519 +22,550 @@ see-also:
 
 ## Open Questions
 
-1. ~~FLPATH-4491 (Finalize UDLM) is blocked. Should work proceed against UDLM
-   v1.5.3 at risk, or wait for finalization?~~ **Resolved:** Proceed now. Pin
-   the SDK to the current UDLM release (v1.5.3+); treat future schema deltas as
-   a versioned-dependency bump.
-2. Should the shared SDK live in `dcm-project/service-provider-api` or a new
-   repo?
-3. How should `storage.disks[]` -> `layout_ref` + `Storage.Layout` structural
-   transform be handled? Needs a code spike (v1: VM / KubeVirt path only).
+1. Should DCM start with two VM ServiceTypes: the current `vm` for OSAC and a
+   new `vm-udlm` for KubeVirt? The proposal and JSON below show this option, but
+   it is not a final decision. OSAC must keep working.
+2. The JSON example below uses `dcm/storage-layouts/vm-123` as a sample
+   `layout_ref`. Where will DCM store each VM's `StorageLayout`, and how will
+   DCM resolve the real reference?
+3. How will KubeVirt provide boot and data disks at the sizes requested in the
+   layout?
+4. When a VM is deleted, should its disks be deleted or kept? UDLM puts this
+   choice on `Volume.retain_on_release`, not on `StorageLayout`.
+5. Should the shared SDK types go in `dcm-project/service-provider-api` or a new
+   repository?
 
 ### Related Jira Tickets
 
-| Ticket                                                         | Summary                                                        | UDLM Mention                      |
-| -------------------------------------------------------------- | -------------------------------------------------------------- | --------------------------------- |
-| [FLPATH-4436](https://redhat.atlassian.net/browse/FLPATH-4436) | Align DCM types with UDLM (epic)                               | Yes                               |
-| [FLPATH-4793](https://redhat.atlassian.net/browse/FLPATH-4793) | Enhancement: Align DCM with UDLM at the SP boundary            | Yes (this document)               |
-| [FLPATH-4491](https://redhat.atlassian.net/browse/FLPATH-4491) | Finalize UDLM (blocker, status: New)                           | Yes                               |
-| [FLPATH-4654](https://redhat.atlassian.net/browse/FLPATH-4654) | Test alignment of DCM types with UDLM                          | Yes                               |
-| [FLPATH-4298](https://redhat.atlassian.net/browse/FLPATH-4298) | Define output parameters for service types                     | **No**                            |
-| [FLPATH-4748](https://redhat.atlassian.net/browse/FLPATH-4748) | Define output definitions on service types with CEL validation | **No**                            |
-| [FLPATH-4749](https://redhat.atlassian.net/browse/FLPATH-4749) | Add outputs query endpoint for service type instances          | **No**                            |
-| [FLPATH-4487](https://redhat.atlassian.net/browse/FLPATH-4487) | Implement Environment Agent usage in DCM control plane         | No (transport layer) — **Closed** |
-| [FLPATH-4767](https://redhat.atlassian.net/browse/FLPATH-4767) | Remove KubeVirt SP HTTP APIs in favor of agent-based (NATS)    | No (transport layer)              |
-
-> **Risk:** FLPATH-4298/4748/4749 are building the outputs subsystem without
-> referencing UDLM. This risks locking in a DCM-specific format that will need
-> rework.
+| Ticket                                                                                                                                                                                         | Relation                                                 |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| [FLPATH-4436](https://redhat.atlassian.net/browse/FLPATH-4436)                                                                                                                                 | Epic: align DCM types with UDLM                          |
+| [FLPATH-4793](https://redhat.atlassian.net/browse/FLPATH-4793)                                                                                                                                 | This enhancement                                         |
+| [FLPATH-4654](https://redhat.atlassian.net/browse/FLPATH-4654)                                                                                                                                 | Test the alignment                                       |
+| [FLPATH-4491](https://redhat.atlassian.net/browse/FLPATH-4491)                                                                                                                                 | Finalize UDLM; v1 proceeds against pinned schemas        |
+| [FLPATH-4298](https://redhat.atlassian.net/browse/FLPATH-4298), [FLPATH-4748](https://redhat.atlassian.net/browse/FLPATH-4748), [FLPATH-4749](https://redhat.atlassian.net/browse/FLPATH-4749) | Coordinate VM output definitions and delivery            |
+| [FLPATH-4767](https://redhat.atlassian.net/browse/FLPATH-4767)                                                                                                                                 | KubeVirt SP transport work; separate from the data model |
 
 ## Summary
 
-Align DCM (Data Center Management) Service Provider boundary with UDLM
-(Universal Data Lifecycle Model) so that UDLM becomes the common language
-between Service Providers (SPs) and the DCM control plane.
-
-**v1 scope:** `Machine.VM` (UDLM) / `service_type: vm` (DCM) / **KubeVirt SP**
-only. This delivers request translation, UDLM-aligned outputs, and a shared SDK
-interface as a reference pattern. Other service types and SPs (OSAC, VMware,
-container, cluster) follow the same architecture in later phases.
-
-v1 means request payloads sent to KubeVirt SP follow UDLM `Machine.VM`
-structure, and realized payloads follow UDLM `outputs` (IPs, hostnames, provider
-handles). A shared SDK provides UDLM types and the SP interface contract;
-KubeVirt SP implements naturalize/denaturalize as the reference implementation.
-
-### v1 Scope
-
-| Layer                | v1 deliverable                                                    | Out of v1 scope                                                    |
-| -------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------ |
-| **UDLM type**        | `Machine.VM` only                                                 | `Machine.Container`, `Machine.Cluster`, database, storage, network |
-| **DCM service type** | `service_type: vm` (`servicetypes/vm/spec.yaml`)                  | All other service types                                            |
-| **Service Provider** | **KubeVirt SP** (`kubevirt-sp`) — reference implementation        | OSAC SP, VMware/vSphere SP, other VM backends                      |
-| **Control plane**    | Translator + outputs for `vm` at SPRM dispatch boundary           | Translators for other service types                                |
-| **SDK**              | `Machine.VM` + `MachineVMOutputs` + `VMServiceProvider` interface | Other UDLM type structs until next phase                           |
-
-There is no separate "VM Service Provider" component. `service_type: vm` is the
-DCM abstraction; KubeVirt SP is one concrete backend that registers against it.
-OSAC SP also registers as `service_type: vm` but is explicitly deferred from v1.
+Use UDLM `Machine.VM` and `StorageLayout` from the catalog through placement to
+the KubeVirt Service Provider. One proposed transition adds `vm-udlm` beside the
+existing `vm` ServiceType so OSAC can keep using its current request. Whether
+both types launch together is still open. Align observed KubeVirt VM outputs
+through DCM's shared outputs path in a separate delivery milestone.
 
 ## Motivation
 
-DCM currently uses its own ServiceType schemas (`spec.yaml`) with field names
-and structures that differ from UDLM. Each SP implements ad-hoc field mapping
-against DCM's internal format, and SPs return only a status string (`"RUNNING"`)
-with no structured outputs (no IP, hostname, MAC). There is no shared contract
-between SPs, so each one must learn DCM-specific conventions.
+DCM's current `vm` ServiceType uses `vcpu` and `storage.disks[]`. UDLM uses
+`Machine.VM.spec.cpu` and a separate `StorageLayout.spec.entries[]`. OSAC still
+needs the current DCM VM request. The proposed separate `vm-udlm` ServiceType
+would let KubeVirt use the UDLM contract without breaking OSAC. Under that
+option, the formats coexist with separate catalog defaults, policies, and
+provider routing.
 
-UDLM provides a vendor-neutral specification that defines resource schemas,
-types, and outputs. Aligning DCM with UDLM establishes a single contract at the
-SP boundary, simplifies new SP onboarding, and enables structured outputs that
-consumers (CLI, UI, other services) can use without provider-specific parsing.
+The VM request still needs DCM information. `service_type` routes the request,
+and `metadata` identifies the DCM resource. These fields belong in a DCM
+envelope, not in the UDLM `Machine.VM` spec. The existing OSAC `vm` request
+keeps `provider_hints.osac`; the proposed KubeVirt `vm-udlm` v1 request does not
+define or accept `provider_hints`.
 
 ### Goals
 
-**v1 (this effort):**
-
-- Align `service_type: vm` request payloads to UDLM `Machine.VM` at the SP
-  dispatch boundary (translation layer)
-- Align realized VM outputs to UDLM `Machine.VM` outputs schema
-- Deliver a shared SDK with `Machine.VM` types and `VMServiceProvider` interface
-- Implement naturalize/denaturalize in **KubeVirt SP** as the reference SP
-
-**Long-term (post-v1):**
-
-- Extend the same pattern to other service types and SPs
-- New SPs integrate by importing the SDK and implementing the interface
-- DCM internal schemas (catalog, policy, intent) converge to UDLM over time
+- Use the pinned UDLM `Machine.VM` spec for the KubeVirt VM path from
+  CatalogItem resolution through policy, placement, and dispatch.
+- Keep the current OSAC VM request usable during the transition. If the two
+  ServiceTypes are chosen, keep `vm` for OSAC and use `vm-udlm` for KubeVirt,
+  with no cross-routing.
+- Reject a VM request if no available provider supports its contract.
+- Let one VM CatalogItem define UDLM VM fields and inline disk-layout defaults.
+  Create one UDLM `StorageLayout` record per ordered VM and set `layout_ref`.
+- Validate the VM, layout, and reference before dispatch. The provider must
+  honor requested disk sizes or reject the request.
+- Naturalize UDLM VM and layout data inside KubeVirt SP. Denaturalize observed
+  VM data to UDLM-aligned output values as the outputs path supports them.
+- Use shared SDK types for the pinned UDLM contracts and SP boundary.
 
 ### Non-Goals
 
-**v1:**
-
-- Other service types (`container`, `database`, `cluster`, `storage`, `network`)
-- Other VM backends (OSAC SP, VMware/vSphere SP)
-- Replacing DCM catalog, policy engine, or placement manager with UDLM schemas
-  (Chris's full Option A upstream adoption — target end state, not v1)
-- Defining new UDLM types — this enhancement consumes existing UDLM specs
-
-**General:**
-
-- Replacing DCM's internal catalog system, policy engine, or placement manager
-  in a single step
-- Environment Agent work — **done**
-  ([FLPATH-4487](https://redhat.atlassian.net/browse/FLPATH-4487), Closed).
-  Remaining transport work is SP-side HTTP removal
-  ([FLPATH-4767](https://redhat.atlassian.net/browse/FLPATH-4767))
+- Changing OSAC SP in v1 or adding VMware and other SPs to the UDLM VM path.
+- Creating a second user-facing CatalogItem for the VM's disk layout.
+- Adding `entries[]` inside `Machine.VM`; UDLM defines them on `StorageLayout`.
+- Replacing DCM's catalog, policy engine, placement, or transport with UDLM.
+- Defining a new UDLM type. Any needed UDLM schema change is a separate,
+  versioned dependency.
 
 ## Proposal
 
-### Approach
+The sections below describe **Candidate A: two ServiceTypes**. This is a
+proposed transition, not a decision. Open Question 1 must be resolved before
+implementation. If another option is chosen, revise the ServiceType name,
+examples, routing, tests, and rollout plan together. The UDLM VM and layout
+contract does not depend on that choice.
 
-Two options were evaluated (see [Alternatives](#alternatives) for full
-comparison):
+### Contract and ownership
 
-- **Option A** -- adopt UDLM schemas directly across all components at once
-- **Option B** -- add a translation layer at the dispatch boundary; each SP
-  migrates independently
+Under Candidate A, DCM would add a `vm-udlm` ServiceType with a DCM envelope.
+The existing `vm` ServiceType and its schema would stay available for OSAC:
 
-**Decision: Option B first, converge to Option A over time.**
+| Part                                                                     | Owner                     | Purpose                                                 |
+| ------------------------------------------------------------------------ | ------------------------- | ------------------------------------------------------- |
+| `service_type`, `metadata`                                               | DCM                       | Routing and name/labels                                 |
+| `machine_vm`                                                             | UDLM `Machine.VM.spec`    | Portable VM request, including `layout_ref`             |
+| `storage_layout.spec`                                                    | UDLM `StorageLayout.spec` | Inline catalog input for named, sized disks             |
+| `machine_vm_schema_id`, `storage_layout.ref`, `storage_layout.schema_id` | DCM                       | Pinned schemas and resolved layout identity at dispatch |
 
-**Reviewer feedback (croadfeldt):** Full UDLM adoption upstream — catalog items,
-service categories, intent capture, policy — is the north star and may be less
-total work long term than maintaining a translation layer. Option B at the SP
-boundary is the pragmatic v1 path given blast radius and active developer
-velocity on DCM field names. v1 proves the pattern on `Machine.VM` / KubeVirt
-SP; convergence to Option A across the platform remains the explicit end state.
+The names `machine_vm` and `storage_layout` are **proposed DCM envelope
+fields**. They do not exist in today's DCM API. `machine_vm` follows the pinned
+UDLM VM spec. `storage_layout.spec` follows the pinned UDLM layout spec;
+`machine_vm_schema_id`, `storage_layout.ref`, and `storage_layout.schema_id` are
+DCM envelope fields, not UDLM spec fields. At catalog authoring time, the
+`vm-udlm` catalog author supplies VM defaults and `storage_layout.spec.entries`
+only. `machine_vm.layout_ref`, both schema IDs, and `storage_layout.ref` are
+system-generated: they must be absent from CatalogItem fields and user values.
+The authoring schema allows them to be absent; the resolved dispatch schema
+requires them. At order time, DCM creates a separate layout record for that VM
+and fills both references and schema IDs. The layout record is not another
+CatalogItem or a DCM `storage` ServiceType.
 
-#### Why Option B -- blast radius analysis
+One layout record belongs to one VM. The CatalogItem is the reusable template;
+ordered VMs do not share a mutable layout record. DCM stores the layout and its
+resolved identity with the VM request so later catalog edits cannot change an
+existing VM's disks. Before dispatch, DCM resolves `layout_ref` to exactly one
+layout and sends both UDLM specs, the same resolved reference, and both pinned
+schema IDs to KubeVirt SP in the DCM envelope. The provider rejects a reference
+or either schema mismatch. DCM must add `vm-udlm` to its allowed ServiceType
+names and public schema. KubeVirt advertises `vm-udlm` through the Environment
+Agent, while OSAC keeps its direct control-plane registration for `vm`.
+Validation, placement, dispatch, retry, and fallback must match the exact
+ServiceType. If no compatible ready provider is available, the request fails; it
+must never cross to the other VM contract.
 
-A field-name rename (Option A) is not isolated to Service Providers. The VM
-field names flow through the entire stack:
+### Candidate A: parallel VM ServiceTypes during transition
 
+The existing `vm` ServiceType keeps the DCM VM schema, OSAC CatalogItems, and
+legacy policy paths. The new `vm-udlm` ServiceType has separate KubeVirt
+CatalogItems and UDLM policy paths. A CatalogItem names one ServiceType, so DCM
+validates and places each request against its own schema. The provider receives
+that same format. OSAC's `cluster` contract is unchanged.
+
+Both providers can run in one DCM deployment only if placement and both dispatch
+paths preserve these exact service-type capabilities. A missing provider or
+empty capability list must not bypass this check or cause fallback across the
+two VM types. Users will see two VM types during the transition. Moving OSAC to
+UDLM and retiring legacy `vm` are later decisions, not part of this v1 change.
+
+The layout ID must be stable for retries of the same VM order. DCM must not
+dispatch until the layout is saved and bound to that VM. If an order fails
+before dispatch, DCM must remove an unused layout or make a retry reuse it.
+Deleting a VM must also settle ownership of its layout and any realized volumes;
+volume data retention remains the open decision above.
+
+### Candidate A: parallel VM paths
+
+| Concern                         | Legacy `vm` (OSAC)                            | New `vm-udlm` (KubeVirt)                                             |
+| ------------------------------- | --------------------------------------------- | -------------------------------------------------------------------- |
+| VM fields in catalog and policy | DCM `vcpu`, `storage.disks`                   | UDLM `machine_vm.cpu`, `storage_layout.spec.entries`                 |
+| Disk defaults                   | Inline `storage.disks` on an OSAC CatalogItem | Inline `storage_layout.spec.entries` on a KubeVirt CatalogItem       |
+| Disk identity after order       | Disk names in VM spec                         | Per-VM `StorageLayout` and `Machine.VM.layout_ref`                   |
+| Provider mapping                | DCM VM fields to OSAC                         | UDLM VM and layout specs to KubeVirt                                 |
+| Provider result                 | Existing OSAC status behavior                 | Status at launch; typed `output_spec` in the later outputs milestone |
+
+### Field comparison between separate contracts
+
+These fields belong to different ServiceTypes. Existing `vm` fields stay as they
+are.
+
+| Legacy `vm` field          | New `vm-udlm` field                  | Rule                                                 |
+| -------------------------- | ------------------------------------ | ---------------------------------------------------- |
+| `vcpu.count`               | `machine_vm.cpu.count`               | Legacy field stays on `vm`                           |
+| `memory.size`              | `machine_vm.memory.size`             | Use UDLM quantity validation                         |
+| `guest_os.type`            | `machine_vm.guest_os.type`           | Keep OS selection in the VM spec                     |
+| `storage.disks[].name`     | `storage_layout.spec.entries[].name` | Stable per-layout disk identity                      |
+| `storage.disks[].capacity` | `storage_layout.spec.entries[].size` | Honor the requested size                             |
+| Disk named `boot`          | Entry with `role: "boot"`            | `role` is optional in UDLM; set it for the boot disk |
+| No layout reference        | `machine_vm.layout_ref`              | DCM fills it after creating the per-VM layout        |
+| `service_type`, `metadata` | Same DCM envelope fields             | Keep outside the UDLM VM spec                        |
+| `provider_hints.osac`      | Not used in `vm-udlm` v1             | Retain only for legacy OSAC `vm` requests            |
+
+### Candidate A example: one KubeVirt VM CatalogItem
+
+This **proposed** JSON assumes Candidate A. It follows the current DCM pattern:
+the catalog author fixes the disk list; the user may change the VM name. A
+CatalogItem may make other fields editable later. `fields[].path` must be valid
+against the new DCM VM envelope schema.
+
+```json
+{
+  "api_version": "v1alpha1",
+  "display_name": "Development VM",
+  "spec": {
+    "resources": [
+      {
+        "name": "vm",
+        "service_type": "vm-udlm",
+        "fields": [
+          { "path": "metadata.name", "editable": true, "default": "web-01" },
+          { "path": "machine_vm.cpu.count", "editable": false, "default": 2 },
+          {
+            "path": "machine_vm.memory.size",
+            "editable": false,
+            "default": "8Gi"
+          },
+          {
+            "path": "machine_vm.guest_os.type",
+            "editable": false,
+            "default": "rhel-9"
+          },
+          {
+            "path": "storage_layout.spec.entries",
+            "editable": false,
+            "default": [
+              { "name": "root", "size": "50Gi", "role": "boot" },
+              { "name": "data", "size": "100Gi" }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
-spec.yaml → codegen → seed.go → PostgreSQL → spec_builder → OPA engine → SPRM → SP
+
+Assume DCM returns the CatalogItem UID `catalog-item-123`. The user orders this
+**one** `vm-udlm` CatalogItem by that UID. No separate storage order is needed.
+The order request is:
+
+```json
+{
+  "api_version": "v1alpha1",
+  "display_name": "Web VM",
+  "spec": {
+    "catalog_item_id": "catalog-item-123",
+    "user_values": [
+      { "resource": "vm", "path": "metadata.name", "value": "web-01" }
+    ]
+  }
+}
 ```
 
-| Component                               | Impact of Option A (rename)                                                                                                                                                                 | Option B (translation layer)                        |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| **OPA Policies**                        | **Critical (silent failure).** Rego code references `input.spec.vcpu`, `input.spec.guest_os`. After rename, these evaluate to `undefined` with no error -- policies silently stop matching. | **No change.** Policies keep using DCM field names. |
-| **PostgreSQL CatalogItems**             | **Critical (data migration).** Field paths like `"vcpu.count"`, `"guest_os.type"` are persisted in JSONB. Requires DB migration.                                                            | **No change.** CatalogItems stay in DCM format.     |
-| **KubeVirt SP** (`mapper.go`)           | Code break -- references `.Vcpu`, `.Memory`, `.Storage`, `.GuestOs`                                                                                                                         | Changes to accept UDLM types (intended)             |
-| **OSAC SP** (`translate.go`, `disk.go`) | Code break                                                                                                                                                                                  | Changes on its own schedule                         |
-| **seed.go + tests**                     | Code break -- map keys, assertions                                                                                                                                                          | **No change**                                       |
-| **e2e tests**                           | Code break -- struct fields, JSON payloads                                                                                                                                                  | **No change**                                       |
+An OSAC CatalogItem instead continues to use `service_type: vm` and legacy DCM
+field paths such as `vcpu.count` and `storage.disks`.
 
-Components that are already field-name-agnostic (safe with either option): SPRM
-(`map[string]any` pass-through), Placement (DAG structure only), spec_builder
-(dot-paths), CLI (generated clients).
+### Candidate A example: resolved VM request
 
-The translation layer at the SPRM (Service Provider Resource Manager) dispatch
-boundary is the right cut point. Everything upstream continues using DCM field
-names. Only the SP side changes.
+After catalog resolution, DCM creates a `StorageLayout` record with those
+`entries`. It fills `layout_ref` with a resolvable path to that record. The
+following **proposed** dispatch envelope shows both specs. The sample path is
+illustrative; its namespace, pin, and lookup API still need to be agreed.
+
+```json
+{
+  "service_type": "vm-udlm",
+  "metadata": { "name": "web-01" },
+  "machine_vm_schema_id": "https://udlm.dev/registry/udlm/0.1/Machine.VM/2.1.0",
+  "machine_vm": {
+    "cpu": { "count": 2 },
+    "memory": { "size": "8Gi" },
+    "guest_os": { "type": "rhel-9" },
+    "layout_ref": "dcm/storage-layouts/vm-123"
+  },
+  "storage_layout": {
+    "ref": "dcm/storage-layouts/vm-123",
+    "schema_id": "https://udlm.dev/registry/udlm/0.1/StorageLayout/0.7.0",
+    "spec": {
+      "entries": [
+        { "name": "root", "size": "50Gi", "role": "boot" },
+        { "name": "data", "size": "100Gi" }
+      ]
+    }
+  }
+}
+```
+
+The proposed `vm-udlm` v1 envelope does not accept `provider_hints`. Legacy OSAC
+`vm` requests keep `provider_hints.osac`. The provider checks that
+`storage_layout.ref` matches `layout_ref`, that both schema IDs are supported,
+and that the disk sizes can be fulfilled. It never silently substitutes a
+different size. The example illustrates the target contract; current KubeVirt SP
+cannot yet fulfill these sizes.
+
+### VM request and result flow
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Catalog as DCM Catalog
+    participant Policy as DCM Policy and Placement
+    participant Agent as Environment Agent
+    participant SP as KubeVirt SP
+    participant KubeVirt as KubeVirt API
+    User->>Catalog: Order one vm-udlm CatalogItem
+    Catalog->>Catalog: Merge UDLM-shaped defaults and user values
+    Catalog->>Catalog: Create per-VM StorageLayout and layout_ref
+    Catalog->>Policy: VM envelope and resolved layout
+    Policy->>Policy: Validate and place VM
+    Policy->>Agent: Dispatch vm-udlm envelope and layout
+    Agent->>SP: Relay request
+    SP->>KubeVirt: Naturalize and create VM
+    KubeVirt-->>SP: Observed VM state
+    SP-->>Agent: VM status
+    Agent-->>Catalog: VM status
+    opt Later outputs milestone
+        SP-->>Agent: Denaturalized VM output values
+        Agent-->>Catalog: Typed output_spec
+    end
+```
 
 ### User Stories
 
-#### Story 1: SP developer receives structured request
+#### Story 1: Order a VM
 
-A KubeVirt SP developer receives a `Machine.VM` payload with typed fields
-(`cpu.count`, `memory.size`, `networks[]`) instead of a raw `map[string]any`
-with DCM field names. The SDK provides Go structs and the `VMServiceProvider`
-interface, so the developer implements `Naturalize()` and `Denaturalize()`
-instead of writing ad-hoc field mapping.
+A user chooses one `vm-udlm` CatalogItem and sets only fields the catalog author
+made editable. The user does not create a layout record or write `layout_ref`.
+An OSAC user can still order a legacy `vm` CatalogItem.
 
-#### Story 2: Consumer retrieves VM outputs
+#### Story 2: Apply VM policy
 
-A CLI user or UI component queries the CatalogItemInstance API and receives
-structured outputs: `ip_addresses`, `hostname`, `mac_addresses`,
-`provider_handle`, `observed_run_state`. Today they only get a status string.
+A policy author for `vm-udlm` reads the same UDLM-shaped VM fields that KubeVirt
+SP receives. For example, CPU policy reads `machine_vm.cpu.count`. Existing `vm`
+policies retain their DCM field paths. DCM still uses `service_type`, metadata,
+and placement context for its own decisions.
 
-#### Story 3: New SP onboarding
+#### Story 3: Read VM outputs
 
-A team building a VMware SP imports the shared SDK, implements the
-`VMServiceProvider` interface with vSphere-specific naturalize/denaturalize
-logic, and registers with DCM. No control plane changes needed. The SP receives
-`Machine.VM` and returns `MachineVMOutputs` -- the same contract as every other
-VM SP.
+A user reads the VM's status and typed output values, such as `primary_ip` and
+`hostname`, through DCM after the output milestone lands. The provider supplies
+these values after observing the VM; they are not predicted from the request.
 
 ### Implementation Details/Notes/Constraints
 
-#### VM Provisioning: Today vs Target
-
-**Today (DCM-shaped payload, HTTP dispatch, status string back):**
-
-1. User submits a VM request via CLI or API.
-2. Catalog Manager merges CatalogItem defaults with user-provided overrides.
-3. Policy engine (OPA) validates the merged payload.
-4. Placement selects a target SP and environment.
-5. Control plane sends a DCM-shaped payload directly to the KubeVirt SP via
-   HTTP.
-6. KubeVirt SP performs ad-hoc field mapping and creates a `VirtualMachine` CR.
-7. SP reports back a status string (`"RUNNING"`) via NATS. No IP, no hostname,
-   no MAC.
-
-**Target (UDLM payload, agent-based NATS dispatch, structured outputs back):**
-
-1. Steps 1-4 are identical.
-2. DCM-to-UDLM translator converts the merged payload to a UDLM `Machine.VM`
-   payload.
-3. Control plane publishes the UDLM-shaped payload (+ `provider_hints` as a
-   sidecar) to NATS.
-4. The Environment Agent receives the message and forwards it to the local SP
-   (transparent relay).
-5. KubeVirt SP calls `Naturalize()` to convert `Machine.VM` to a KubeVirt
-   `VirtualMachine` CR.
-6. SP creates the VM via the KubeVirt API.
-7. SP calls `Denaturalize()` to convert VMI status to structured
-   `MachineVMOutputs`.
-8. SP hands outputs to the Environment Agent, which publishes them back to NATS.
-
-#### Architecture: Today vs Target
-
-**Today:**
-
-```mermaid
-flowchart LR
-    subgraph cp [DCM Control Plane]
-        User --> CatalogMgr["Catalog Manager"]
-        CatalogMgr -->|"merge defaults\n+ user_values"| Spec["Merged Spec\n(DCM-shaped)"]
-        Spec --> OPA["Policy (OPA)\nreferences vcpu,\nguest_os, etc."]
-        OPA --> Placement
-        Placement --> SPRM
-    end
-
-    SPRM -->|"DCM payload\n(HTTP)"| KubevirtSP["KubeVirt SP\n(ad-hoc mapping)"]
-    KubevirtSP --> KubeVirtAPI["KubeVirt API"]
-    KubeVirtAPI -->|"status: RUNNING\n(no IP, no MAC)"| StatusConsumer["Status Consumer"]
-```
-
-**Target (with UDLM alignment):**
-
-```mermaid
-flowchart LR
-    subgraph cp [DCM Control Plane]
-        User --> CatalogMgr["Catalog Manager"]
-        CatalogMgr -->|"merge defaults\n+ user_values"| Spec["Merged Spec\n(DCM-shaped)"]
-        Spec --> OPA["Policy (OPA)\n(unchanged)"]
-        OPA --> Placement
-        Placement --> SPRM
-        SPRM --> Translator["DCM-to-UDLM\nTranslator"]
-    end
-
-    subgraph env [Remote Environment]
-        Agent["Environment\nAgent"] --> KubevirtSP["KubeVirt SP\n(shared SDK)"]
-        KubevirtSP -->|"Naturalize()"| KubeVirtAPI["KubeVirt API"]
-        KubeVirtAPI -->|"Denaturalize()"| Outputs["MachineVMOutputs\nIPs, hostname,\nMAC, run_state"]
-    end
-
-    Translator -->|"UDLM Machine.VM\n+ provider_hints\n(NATS)"| Agent
-    Outputs -->|"structured outputs\n(NATS)"| StatusConsumer["Status Consumer"]
-```
-
-**The key boundary:** The translator sits between SPRM and NATS. Everything to
-the left (OPA, Placement, CatalogItems, PostgreSQL) stays in DCM format.
-Everything to the right (SPs) speaks UDLM via the shared SDK.
-
-#### What Needs to Change -- 4 Layers (v1: Machine.VM / KubeVirt SP)
-
-> v1 implements all four layers for `Machine.VM` / `service_type: vm` / KubeVirt
-> SP only. The layer model applies to other service types in later phases.
-
-**Layer 1: Schema alignment (request payload)**
-
-The translation layer lives in the control plane at the SPRM dispatch boundary.
-It converts DCM `map[string]any` to UDLM typed structs before sending to SPs.
-
-| DCM Field                | UDLM Field                                 | Notes                                                           |
-| ------------------------ | ------------------------------------------ | --------------------------------------------------------------- |
-| `vcpu`                   | `cpu`                                      | Add `sockets`, `cores_per_socket`                               |
-| `memory.size` (MB/GB/TB) | `memory.size` (Mi/Gi/MB/GB/TB/MiB/GiB/TiB) | Add binary units                                                |
-| `storage.disks[]`        | `layout_ref` + `storage` + `storage_tier`  | Structural transform -- disks become `Storage.Layout` reference |
-| _(not in DCM)_           | `networks[]`                               | vlan, subnet, zone, tier, mac, ip_address_ref                   |
-| _(not in DCM)_           | `placement`                                | location_ref, zone, affinity rules                              |
-| _(not in DCM)_           | `firmware`                                 | type (bios/uefi), secure_boot, vtpm                             |
-| _(not in DCM)_           | `run_state`                                | desired_state: running/stopped/suspended                        |
-| _(not in DCM)_           | `instance_size`                            | Alternative to explicit cpu+memory (`oneOf`)                    |
-| `provider_hints`         | Provider Class optional fields             | During transition, pass as sidecar alongside UDLM payload       |
-
-**How provider-specific required fields are resolved**
-
-UDLM defines the portable fields -- what the user wants (cpu, memory, guest_os).
-But each provider needs additional platform-specific data to create a functional
-resource. For example, KubeVirt requires a `namespace`; VMware requires a
-`datacenter`, `cluster`, and `datastore`. These fields are not in UDLM's
-`Machine.VM` because they are not portable across providers.
-
-The provider-specific data comes from three sources, merged in priority order
-(later wins):
-
-| Priority | Source                  | Example (KubeVirt)                                | Example (VMware)                             |
-| -------- | ----------------------- | ------------------------------------------------- | -------------------------------------------- |
-| 1        | SP environment config   | `namespace: production-vms`                       | `datacenter: DC-RDU2, cluster: Prod`         |
-| 2        | CatalogItem defaults    | may override SP defaults                          | may override SP defaults                     |
-| 3        | User request            | `cpu: 4, memory: 8Gi`                             | `cpu: 4, memory: 8Gi`                        |
-| 4        | `provider_hints` (user) | `namespace: my-special-ns` (overrides SP default) | `folder: /vm/testing` (overrides SP default) |
-
-This means a CatalogItem can be fully portable -- just `cpu`, `memory`,
-`guest_os` -- and Placement decides which SP handles it. The SP fills in
-platform-specific required fields from its own environment config.
-Naturalization is the step in each SP that combines UDLM portable fields with
-provider-specific context to produce a functional provider-native resource
-(e.g., a KubeVirt `VirtualMachine` CR or a vSphere VM spec).
-
-In UDLM terms, provider-specific fields are declared in **Provider Classes**
-(e.g., `Machine.VM.OCPVirt` for KubeVirt, `Machine.VM.VSphere` for VMware).
-During the transition, these fields travel as `provider_hints` alongside the
-UDLM payload. Long-term, they are formally declared in the Provider Class schema
-so they are typed and validated.
-
-**Layer 2: Outputs contract (realized payload)**
-
-The biggest gap and the recommended starting point.
-
-Current status payload:
-
-```go
-type VmStatus struct {
-    Id      string `json:"id"`
-    Status  string `json:"status"`
-    Message string `json:"message"`
-}
-```
-
-Target (aligned with UDLM `outputs`):
-
-```go
-type MachineVMOutputs struct {
-    IPAddresses      []string `json:"ip_addresses"`
-    PrimaryIP        string   `json:"primary_ip"`
-    Hostname         string   `json:"hostname"`
-    MACAddresses     []string `json:"mac_addresses"`
-    ProviderHandle   string   `json:"provider_handle"`
-    ObservedRunState string   `json:"observed_run_state"`
-    TargetSegment    string   `json:"target_segment"`
-}
-```
-
-Actions required:
-
-1. Define outputs schema aligned with UDLM for each service type.
-2. Update the status consumer to store structured outputs.
-3. Update the `CatalogItemInstance` API to serve outputs on GET.
-
-**Layer 3: SP contract / SDK**
-
-The SDK is a shared library (e.g., evolve `dcm-project/service-provider-api`)
-that both the control plane and every SP import:
-
-- **Control plane** imports the SDK for the translator (needs `MachineVM` as
-  target type) and the StatusConsumer (needs `MachineVMOutputs` to parse SP
-  responses).
-- **Each SP** imports the SDK to implement the `VMServiceProvider` interface
-  (`Naturalize`, `Realize`, `Denaturalize`) using the shared types.
-
-```
-dcm-project/service-provider-api/        <-- shared, both control plane and SPs import
-  pkg/types/machine_vm.go                <-- UDLM Machine.VM as Go struct
-  pkg/types/machine_vm_outputs.go        <-- UDLM outputs as Go struct
-  pkg/contract/interfaces.go             <-- VMServiceProvider interface
-  pkg/helpers/units.go                   <-- GB<->Gi, MB<->Mi
-
-dcm-project/kubevirt-sp/                 <-- per-SP, imports shared SDK
-  pkg/naturalize.go                      <-- MachineVM -> KubeVirt VirtualMachine CR
-  pkg/denaturalize.go                    <-- VMI status -> MachineVMOutputs
-```
-
-Both sides of the boundary speak the same types. A new SP joins by importing the
-SDK and implementing the interface.
-
-The SDK also defines a standard error type:
-
-```go
-type SPError struct {
-    Code    string  // "NATURALIZE_FAILED", "REALIZE_FAILED", "DENATURALIZE_FAILED"
-    Message string
-}
-```
-
-**Layer 4: Migration path (KubeVirt SP as reference)**
-
-- Accept UDLM-shaped `Machine.VM` payloads
-- Implement denaturalization: extract IP, hostname, MAC from VMI status and
-  return as UDLM outputs
-- Add `networks[]` support (map to KubeVirt interfaces/networks)
-- Add `placement` support (map to node selectors/affinity rules)
-- Add `firmware` support (map to KubeVirt domain firmware/features)
-- Serves as the reference implementation for other SPs
-
-#### Transition Mechanism
-
-During the transition, both DCM-shaped and UDLM-shaped payloads coexist. Each SP
-declares its capability at registration:
-
-| Payload format | Request                    | Response                      |
-| -------------- | -------------------------- | ----------------------------- |
-| `"dcm"`        | DCM-shaped payload (as-is) | Status string                 |
-| `"udlm"`       | UDLM `Machine.VM` payload  | Structured `MachineVMOutputs` |
-
-The outputs-first sequencing creates a natural intermediate state (DCM payload
-in, structured outputs out):
-
-|                     | Status string out | Structured outputs out |
-| ------------------- | ----------------- | ---------------------- |
-| **DCM payload in**  | Current state     | Phase 2 target         |
-| **UDLM payload in** | _(not planned)_   | Full alignment         |
-
-The Environment Agent
-([FLPATH-4487](https://redhat.atlassian.net/browse/FLPATH-4487), **Closed**) is
-a transparent relay -- it does not need to know whether the payload is
-DCM-shaped or UDLM-shaped. The transport foundation is in place; v1 focuses on
-payload format alignment (DCM `vm` spec → UDLM `Machine.VM`) and structured
-outputs. SP-side HTTP removal
-([FLPATH-4767](https://redhat.atlassian.net/browse/FLPATH-4767)) proceeds
-independently.
+- Add `vm-udlm` to the DCM allowed ServiceType names and public API schema. Add
+  its catalog defaults, policies, seed data, and generated API clients. Keep the
+  existing `vm` schema, OSAC CatalogItems, and policy paths unchanged. Check UI,
+  CLI, status, and outputs code for assumptions that every VM has the literal
+  `service_type: vm`.
+- Define and validate the DCM VM envelope. Its `machine_vm` and
+  `storage_layout.spec` fields embed the pinned UDLM **spec** shapes. Keep DCM
+  identity fields outside those specs; do not loosen UDLM validation.
+- Create, persist, resolve, and pin one layout record for each ordered VM.
+  Reject missing, ambiguous, stale, wrong-owner, or malformed references;
+  duplicate entry names; and layouts unsupported by the provider before
+  realization. Retries must reuse the same layout identity.
+- Accept catalog defaults only on declared fields and user values only on
+  editable fields. Reject client-supplied `layout_ref`, layout identity, or
+  schema IDs. Require them in the resolved dispatch envelope and reject either
+  schema-version mismatch.
+- KubeVirt SP naturalizes the VM and resolved layout into KubeVirt resources.
+  Its current implementation does not honor requested disk capacities; v1 must
+  fix this or reject unsupported layouts. Boot-disk source, size, and lifecycle
+  need an explicit supported contract. An unknown guest OS must fail instead of
+  silently selecting a different image.
+- The Environment Agent remains a relay for KubeVirt and advertises `vm-udlm`.
+  OSAC keeps its direct control-plane SP registration for `vm`; its future agent
+  migration is separate. Both dispatch paths must check the exact service type.
+  Registration, retry, and fallback must not silently route either request to a
+  provider of the other type.
+- Reuse the typed `output_spec` status path proposed in
+  [cross-provider-outputs PR #99](https://github.com/dcm-project/enhancements/pull/99).
+  Define VM output fields against the pinned UDLM `Machine.VM` names:
+  `provider_handle`, `primary_ip`, `hostname`, `ip_addresses`, `mac_addresses`,
+  `observed_run_state`, and `target_segment`. Adding all these observed values
+  is a separate milestone, not a prerequisite for the `vm-udlm` launch. Do not
+  invent a value KubeVirt cannot observe.
+- UDLM `StorageLayout` describes disk shape, not volume retention. Any v1
+  promise about preserving data after VM deletion needs a separate Volume and
+  provider lifecycle rule. Do not infer retention from `layout_ref`.
+- A missing or empty ready-provider list must not skip service-type capability
+  checks for `vm-udlm`; reject the request instead of sending it to OSAC.
 
 ### Risks and Mitigations
 
-| Risk                                                         | Impact                                                   | Mitigation                                                                 |
-| ------------------------------------------------------------ | -------------------------------------------------------- | -------------------------------------------------------------------------- |
-| FLPATH-4491 is blocked (UDLM not finalized)                  | Schemas may still change                                 | Pin SDK to UDLM v1.5.3; outputs and SDK structure can proceed              |
-| Outputs work (FLPATH-4298/4748/4749) proceeding without UDLM | Locks in a DCM-specific format                           | Add UDLM reference to those tickets immediately                            |
-| NATS migration (FLPATH-4487/4767) timing                     | Adds scope if coupled                                    | FLPATH-4487 Closed; treat 4767 (SP HTTP removal) as independent of UDLM v1 |
-| Translation layer complexity                                 | Some mappings are structural transforms, not renames     | Spike the VM translator in code first                                      |
-| `additionalProperties: false` shift                          | Undocumented fields passed through open schema may break | Audit actual SP payload usage before designing translator                  |
-| Translation layer becomes permanent                          | No incentive to remove once working                      | Plan for convergence; the layer is explicitly temporary                    |
+| Risk                                                                 | Mitigation                                                                          |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| A legacy `vm` policy is applied to `vm-udlm` or vice versa           | Scope policies by exact ServiceType; test a rejecting policy for each path          |
+| Catalog defaults or user values mix the two VM shapes                | Validate each CatalogItem against its own ServiceType schema                        |
+| A request reaches the wrong provider, including during fallback      | Match exact advertised ServiceType at placement and dispatch; fail closed           |
+| An empty ready-agent list bypasses capability validation             | Require a compatible ready provider for `vm-udlm` before dispatch                   |
+| UI, CLI, or outputs omit `vm-udlm` because they check only `vm`      | Audit VM-specific filters, views, and output paths for both ServiceTypes            |
+| `layout_ref` is missing, ambiguous, or points to another VM's layout | Resolve one pinned layout for this VM before dispatch; reject mismatches            |
+| KubeVirt ignores requested size or boot role                         | Test realized disks against entries; reject unsupported requests                    |
+| Deletion loses data users expected to keep                           | Specify Volume retention and KubeVirt deletion behavior before claiming persistence |
+| UDLM changes after implementation starts                             | Pin schema IDs and commit; review and test each version bump                        |
+| VM outputs conflict with the outputs enhancement                     | Reuse its typed `output_spec` and align definitions to pinned UDLM names            |
 
 ## Design Details
 
-### Sequencing
+### Work sequence
 
-**v1 (Machine.VM / KubeVirt SP):**
+If Candidate A is selected:
 
-| Step | Action                                                                | Notes                                                                              |
-| ---- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| 1    | **Define VM outputs contract** aligned with UDLM `Machine.VM` outputs | Builds on cross-provider-outputs (#99); denaturalize plugs in after opaque outputs |
-| 2    | **Build SDK** with `Machine.VM` + `MachineVMOutputs` types            | Pin to current UDLM release                                                        |
-| 3    | **Update KubeVirt SP** — naturalize/denaturalize                      | Reference implementation for v1                                                    |
-| 4    | **Add VM translation layer** in control plane                         | `service_type: vm` DCM spec → UDLM `Machine.VM` at SPRM boundary                   |
-
-**Post-v1:**
-
-| Phase | Action                                                     | Dependency                                                                         |
-| ----- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| 5     | Extend pattern to other service types / SPs                | v1 pattern proven on VM                                                            |
-| 6     | **Converge DCM schemas** to UDLM (catalog, policy, intent) | Chris's Option A upstream; remove translation layer when all paths are UDLM-native |
+1. Pin UDLM schemas and define the DCM VM envelope and layout-reference rule.
+2. Add `vm-udlm` to allowed ServiceType names and define its schema, CatalogItem
+   paths, policies, defaults, and clients. Preserve the legacy `vm` path.
+3. Make catalog resolution create one layout per VM and give `Machine.VM` a
+   resolvable `layout_ref`. Validate and pass both specs through placement.
+4. Update the shared SDK contract and KubeVirt SP to advertise and accept only
+   `vm-udlm`. Keep OSAC on `vm`. Naturalization must honor supported layout
+   entries. Output population follows the outputs work.
+5. Verify both VM paths and cross-routing failure cases before rollout.
 
 ### Versioning
 
-Pin the SDK to the current UDLM version (v1.5.3). Since DCM is not yet in
-production, a UDLM version update is a coordinated SDK update. No multi-version
-support needed at this stage.
+Pin `udlm/0.1` at commit `ecf0f290cf6dc9f06d7580792fc03b903890934a`, with these
+generated schema IDs:
+
+- `https://udlm.dev/registry/udlm/0.1/Machine.VM/2.1.0`
+- `https://udlm.dev/registry/udlm/0.1/StorageLayout/0.7.0`
+
+The schema version is per class; `udlm/0.1` is not the `Machine.VM` version.
+Record both IDs and the immutable commit in the SDK and DCM dependency. A later
+UDLM change requires a coordinated version bump and validation run.
 
 ### Testing Strategy
 
-Golden file tests for `Machine.VM`: maintain reference files (DCM input payload,
-expected UDLM output, KubeVirt VMI status, expected `MachineVMOutputs`).
-Translation layer unit tests assert input -> expected output. Integration tests
-with real SPs added as needed.
+These checks describe Candidate A. UDLM validation, layout, and KubeVirt
+fulfillment checks are needed under either transition design. If the team
+chooses another way to keep OSAC working, revise the provider-isolation tests
+before implementation.
+
+- Validate `vm` CatalogItems against the unchanged DCM schema and `vm-udlm`
+  CatalogItems against the new UDLM envelope schema. Reject mixed fields.
+  Confirm fixed layout entries cannot be overridden by users, and
+  system-generated references and schema IDs cannot be supplied by users.
+- Check separate policy paths for both ServiceTypes. Include a policy that must
+  reject a request of each type so a missing Rego field cannot pass unnoticed.
+- Check one layout per VM, stable reference resolution, and rejection of
+  missing, ambiguous, stale, swapped, wrong-owner, empty-entry, duplicate-name,
+  duplicate-boot, invalid-size, and unsupported layouts before dispatch. Test
+  idempotent retry and cleanup of failed orders. Verify OSAC cannot receive a
+  `vm-udlm` request.
+- Verify the full CatalogItem → CatalogItemInstance → ServiceTypeInstance →
+  KubeVirt flow for `vm-udlm`, plus a legacy `vm` order to OSAC. Run both paths
+  in one deployment. Check OSAC's direct registration and KubeVirt's agent
+  discovery, including re-registration, missing providers, empty ready-agent
+  lists, retry, and no cross-type fallback. Check actual KubeVirt boot and data
+  disks and sizes, not just the requested JSON. Check restart and deletion once
+  retention is decided.
+- Check naturalization against pinned schemas. Reject unknown guest OS and
+  unsupported storage tiers instead of silently choosing defaults. Check
+  `vm-udlm` v1 rejects provider hints, while legacy OSAC hints still work.
+  Reject either schema ID when it does not match the pinned version. Verify
+  status when `vm-udlm` launches and, separately, populated UDLM output fields
+  as the outputs milestone lands. Verify existing OSAC status and output
+  behavior remains unchanged.
 
 ### Upgrade / Downgrade Strategy
 
-Not applicable at this stage -- DCM is not in production. The per-SP
-`payload_format` flag allows incremental migration. An SP can revert to `"dcm"`
-format if UDLM integration introduces issues.
+DCM is in development, with no saved VM requests requiring data migration. Under
+Candidate A, add the `vm-udlm` schema, catalog and policy path, SDK support, and
+KubeVirt SP alongside the unchanged legacy `vm` path for OSAC. Do not route an
+order until its exact provider capability is available. During rollback, stop
+new `vm-udlm` orders and settle any already created KubeVirt VMs before removing
+its schema or provider; legacy OSAC `vm` orders continue. Do not send either
+request to the other path. If Candidate A is not selected, revise this plan.
 
 ## Implementation History
 
-N/A — no implementation yet.
+N/A — this enhancement has not been implemented.
 
 ## Drawbacks
 
-- Maintaining a translation layer adds complexity during the transition period
-- Two schema formats coexist until convergence, increasing cognitive load for
-  developers working across the boundary
-- The SDK becomes a shared dependency that all SPs and the control plane must
-  keep in sync
+This needs a coordinated change across catalog, policy, placement, SDK, and
+KubeVirt SP before the new VM request works. DCM must also own the identity and
+lifecycle of a per-VM layout record. Candidate A would keep two VM schemas,
+CatalogItems, and policy paths until OSAC migrates. That costs more maintenance
+than a single immediate cutover, but keeps OSAC VM ordering available.
 
 ## Alternatives
 
-### Alternative 1: Option A -- Adopt UDLM schemas directly
+### Alternative 1: Translate DCM VM requests at dispatch
 
 #### Description
 
-Replace DCM's ServiceType schemas (`spec.yaml`) with UDLM field names and
-structure. All components switch at once.
+Keep `vcpu` and `storage.disks[]` in the catalog and policy path. Convert the
+request to UDLM immediately before sending it to KubeVirt SP.
 
 #### Pros
 
-- One schema, no translation layer, no dual-format maintenance
-- Cleanest long-term architecture
+- Changes fewer upstream components at first.
+- Existing DCM VM field paths remain usable during the transition.
 
 #### Cons
 
-- Breaking change across 7 ServiceType schemas, 5+ SPs, OPA policies, PostgreSQL
-  data, seed files, and e2e tests simultaneously
-- OPA policies would silently fail (evaluate to `undefined`) if any Rego code is
-  missed during rename -- silent policy bypass with no error
-- Requires coordinated update across multiple teams working in parallel
-- PostgreSQL CatalogItems store field paths in JSONB -- requires DB migration
-
-See [blast radius analysis](#why-option-b----blast-radius-analysis) for the full
-impact breakdown.
+- DCM and UDLM VM formats coexist and need repeated validation.
+- Disk conversion is structural: a flat disk list becomes a separate layout
+  record and reference.
+- A temporary translator can become a permanent contract boundary.
 
 #### Status
 
-Deferred
+Rejected for v1.
 
 #### Rationale
 
-Option A is the target end state but not feasible as a first step given the
-blast radius. Option B provides the migration bridge for v1 (`Machine.VM` /
-KubeVirt SP). Once all SPs are UDLM-native and DCM schemas converge upstream
-(catalog, policy, intent), Option A is achieved and the translation layer is
-removed.
+OSAC still needs the legacy DCM VM request. Both transition candidates can keep
+that request while KubeVirt CatalogItems start with UDLM fields. Converting only
+at dispatch would leave the KubeVirt catalog and policies on the old VM shape,
+which does not meet the goal of UDLM-aligned requests across DCM.
+
+### Alternative 2: Put disk entries inside Machine.VM
+
+#### Description
+
+Add `entries[]` directly to `Machine.VM` and avoid a separate layout record.
+
+#### Pros
+
+- One object would hold the whole VM request.
+- No reference would need resolution.
+
+#### Cons
+
+- The pinned UDLM `Machine.VM` schema has `layout_ref`, not inline `entries`.
+- This would require a UDLM schema change and a new version before DCM could use
+  it.
+
+#### Status
+
+Rejected for this enhancement.
+
+#### Rationale
+
+Using the existing `StorageLayout` contract keeps the VM request compatible with
+pinned UDLM schemas and leaves disk shape distinct from the VM spec.
+
+### Candidate B: Version both contracts under `service_type: vm`
+
+#### Description
+
+Keep one public `vm` ServiceType name but require a contract identifier on each
+CatalogItem and provider. Use it to choose the schema, policy paths, and
+compatible provider.
+
+#### Pros
+
+- Users would see one VM type.
+- Provider capabilities could express contract versions directly.
+
+#### Cons
+
+- The catalog currently resolves one schema by ServiceType name, so validation
+  and resolution would need a larger redesign.
+- Every placement, retry, and fallback path would need version-aware checks.
+
+#### Status
+
+Under consideration while Open Question 1 is unresolved.
+
+#### Rationale
+
+This would keep one public VM type, but DCM currently resolves one schema by
+ServiceType name and filters providers by ServiceType. It therefore requires
+version-aware catalog validation and routing. Candidate A is easier to isolate
+and verify, but neither candidate has been selected yet.
 
 ## Infrastructure Needed
 
-- Shared SDK repository (new or evolve `dcm-project/service-provider-api`)
-- Golden file test fixtures for `Machine.VM` translation (v1 scope)
+No new runtime infrastructure is required. DCM needs storage and reference
+resolution for per-VM layout records, plus shared SDK packaging. The SDK
+repository choice remains open.
